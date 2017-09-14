@@ -373,6 +373,8 @@ func testEvaluate(t *testing.T, codeIn string) string {
 // TestPanicGeneratesError tests that executing code with an un-recovered panic properly generates both
 // an error "execute_reply" and publishes an "error" message.
 func TestPanicGeneratesError(t *testing.T) {
+	t.Logf("Should return error messages when executing code with an un-recovered panic")
+
 	client, closeClient := newTestJupyterClient(t)
 	defer closeClient()
 
@@ -416,4 +418,139 @@ func TestPanicGeneratesError(t *testing.T) {
 	if !foundPublishedError {
 		t.Fatal("Execution did not publish an expected \"error\" message")
 	}
+}
+
+// TestPrintStdout tests that data written to stdout publishes the same data in a "stdout" "stream" message.
+func TestPrintStdout(t *testing.T) {
+	cases := []struct {
+		Input  []string
+		Output []string
+	}{
+		{[]string{
+			"import \"fmt\"",
+			"import \"os\"",
+			"fmt.Fprintln(os.Stdout, 1)",
+		}, []string{"1\n"}},
+		{[]string{
+			"import \"os\"",
+			"os.Stdout.WriteString(\"2\")",
+		}, []string{"2"}},
+		{[]string{
+			"import \"fmt\"",
+			"fmt.Print(3)",
+		}, []string{"3"}},
+	}
+
+	t.Logf("Should produce stdout stream messages when writing to stdout")
+
+cases:
+	for k, tc := range cases {
+		// Give a progress report.
+		t.Logf("  Evaluating code snippet %d/%d.", k+1, len(cases))
+
+		// Get the result.
+		stdout, _ := testOutputStream(t, strings.Join(tc.Input, "\n"))
+
+		// Compare the result.
+		if len(stdout) != len(tc.Output) {
+			t.Errorf("\t%s Test case expected %d message(s) on stdout but got %d.", failure, len(tc.Output), len(stdout))
+			continue
+		}
+		for i, expected := range tc.Output {
+			if stdout[i] != expected {
+				t.Errorf("\t%s Test case returned unexpected messages on stdout.", failure)
+				continue cases
+			}
+		}
+		t.Logf("\t%s Returned the expected messages on stdout.", success)
+	}
+}
+
+// TestPrintStdout tests that data written to stderr publishes the same data in a "stderr" "stream" message.
+func TestPrintStderr(t *testing.T) {
+	cases := []struct {
+		Input  []string
+		Output []string
+	}{
+		{[]string{
+			"import \"fmt\"",
+			"import \"os\"",
+			"fmt.Fprintln(os.Stderr, 1)",
+		}, []string{"1\n"}},
+		{[]string{
+			"import \"os\"",
+			"os.Stderr.WriteString(\"2\")",
+		}, []string{"2"}},
+	}
+
+	t.Logf("Should produce stderr stream messages when writing to stderr")
+
+cases:
+	for k, tc := range cases {
+		// Give a progress report.
+		t.Logf("  Evaluating code snippet %d/%d.", k+1, len(cases))
+
+		// Get the result.
+		_, stderr := testOutputStream(t, strings.Join(tc.Input, "\n"))
+
+		// Compare the result.
+		if len(stderr) != len(tc.Output) {
+			t.Errorf("\t%s Test case expected %d message(s) on stderr but got %d.", failure, len(tc.Output), len(stderr))
+			continue
+		}
+		for i, expected := range tc.Output {
+			if stderr[i] != expected {
+				t.Errorf("\t%s Test case returned unexpected messages on stderr.", failure)
+				continue cases
+			}
+		}
+		t.Logf("\t%s Returned the expected messages on stderr.", success)
+	}
+}
+
+// testOutputStream is a test helper that collects "stream" messages upon executing the codeIn.
+func testOutputStream(t *testing.T, codeIn string) (stdout []string, stderr []string) {
+	t.Helper()
+
+	client, closeClient := newTestJupyterClient(t)
+	defer closeClient()
+
+	// Create a message.
+	request, err := NewMsg("execute_request", ComposedMsg{})
+	if err != nil {
+		t.Fatal("NewMessage:", err)
+	}
+
+	// Fill in remaining header information.
+	request.Header.Session = sessionID
+	request.Header.Username = "KernelTester"
+
+	// Fill in Metadata.
+	request.Metadata = make(map[string]interface{})
+
+	// Fill in content.
+	content := make(map[string]interface{})
+	content["code"] = codeIn
+	content["silent"] = false
+	request.Content = content
+
+	_, pub := client.request(t, request, 10*time.Second)
+
+	for _, pubMsg := range pub {
+		if pubMsg.Header.MsgType == "stream" {
+			content := getMsgContentAsJsonObject(t, pubMsg)
+			streamType := getString(t, "content", content, "type")
+			streamData := getString(t, "content", content, "text")
+
+			if streamType == "stdout" {
+				stdout = append(stdout, streamData)
+			} else if streamType == "stderr" {
+				stderr = append(stderr, streamData)
+			} else {
+				t.Fatalf("Unknown stream type '%s'", streamType)
+			}
+		}
+	}
+
+	return
 }
